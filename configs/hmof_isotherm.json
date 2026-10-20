@@ -1,0 +1,52 @@
+{
+    "_comment": "hMOF isotherms with adsorbate/state FiLM conditioning (formerly model_training_script_pbc_film.py).",
+
+    "h5_path": "/scratch/sk10275/PONY_ML/PONY_refactored_4/datasets/mofxdb_point_clouds.h5",
+    "train_csv": "hmof_isotherm_train.csv",
+    "val_csv": "hmof_isotherm_val.csv",
+    "test_csv": "hmof_isotherm_test.csv",
+    "output_dir": "/scratch/sk10275/PONY_ML/PONY_refactored_4/models_trained/hmof_isotherm_large_maxabs",
+
+    "target": "Uptake(mol/kg)",
+    "structure_id_col": "ID",
+    "task_mode": "crystal",
+    "num_atomic_features": 8,
+    "feature_scaler": "maxabs",
+    "film_feature_cols": [
+        "T",
+        "log10(P)",
+        "molecular_mass",
+        "critical_temperature",
+        "critical_pressure",
+        "acentric_factor",
+        "triple_point_temperature",
+        "triple_point_pressure",
+        "radius_of_gyration",
+        "site_1_connectivity",
+        "site_1_radii",
+        "site_1_partial_charge",
+        "site_1_epsilon",
+        "site_1_sigma",
+        "site_2_connectivity",
+        "site_2_radii",
+        "site_2_partial_charge",
+        "site_2_epsilon",
+        "site_2_sigma",
+        "site_3_connectivity",
+        "site_3_radii",
+        "site_3_partial_charge",
+        "site_3_epsilon",
+        "site_3_sigma"
+    ],
+    "film_scaler": "maxabs",
+
+    "model_size": "large",
+    "standardize_target": false,
+    "n_train_augments": 1,
+    "enable_rotation_aug": true,
+
+    "epochs": 100,
+    "t_max_epochs": 75,
+    "warmup_epochs": 5,
+    "early_stopping_patience": 25
+}

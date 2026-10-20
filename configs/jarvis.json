@@ -1,0 +1,21 @@
+{
+    "_comment": "JARVIS-DFT 2021 crystals (formerly model_training_script_jarvis.py). Fill in the TODO values.",
+
+    "h5_path": "/scratch/sk10275/PONY_ML/PONY_refactored_4/datasets/jarvis_dft_2021_structures.h5",
+    "train_csv": "TODO",
+    "val_csv": "TODO",
+    "test_csv": "TODO",
+    "output_dir": "TODO",
+
+    "target": "TODO",
+    "structure_id_col": "TODO",
+    "task_mode": "crystal",
+    "num_atomic_features": 8,
+    "feature_scaler": "standard",
+    "film_feature_cols": [],
+
+    "model_size": "medium",
+    "standardize_target": false,
+    "n_train_augments": 1,
+    "enable_rotation_aug": true
+}

@@ -17,8 +17,11 @@ nvidia-smi
 # Load Singularity module
 module load singularity/4.2.0
 
+# Location of this code on the cluster
+PONY_DIR=/scratch/sk10275/PONY_ML/PONY_refactored_4
+
 # Run inside the overlay and activate Conda environment
 singularity exec --nv \
   --overlay /scratch/sk10275/AdsMOFNet-LIBRARY/AdsMOFNet2_v2.ext3 \
   /share/apps/admin/singularity-images/centos-8.2.2004.sif \
-  /bin/bash -c "source /conda/miniforge3/bin/activate && conda activate /conda/miniforge3/envs/mof-dl-pointnet2-v2-2 && exec python /scratch/sk10275/PONY_ML/PONY_refactored_4/model_training_script_pbc_film.py"
+  /bin/bash -c "source /conda/miniforge3/bin/activate && conda activate /conda/miniforge3/envs/mof-dl-pointnet2-v2-2 && exec python $PONY_DIR/train.py $PONY_DIR/configs/hmof_isotherm.json"

@@ -1,0 +1,21 @@
+{
+    "_comment": "PDBbind protein-ligand, StandardScaler + 2 rotational passes per epoch (formerly model_training_script_protein_exp.py). Fill in the TODO values.",
+
+    "h5_path": "/scratch/sk10275/PONY_ML/PONY_refactored_4/datasets/pdbbind_v2016_predefined_pocket.h5",
+    "train_csv": "TODO",
+    "val_csv": "TODO",
+    "test_csv": "TODO",
+    "output_dir": "TODO",
+
+    "target": "TODO",
+    "structure_id_col": "ID",
+    "task_mode": "molecule",
+    "num_atomic_features": 9,
+    "feature_scaler": "standard",
+    "film_feature_cols": [],
+
+    "model_size": "medium",
+    "standardize_target": false,
+    "n_train_augments": 2,
+    "enable_rotation_aug": true
+}

@@ -1,16 +1,14 @@
 import numpy as np
-import pandas as pd
 
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import matplotlib.cm as cm
 import datashader as ds
 import datashader.transfer_functions as tf
 
 from datashader import reductions
 from data_util.calculate_stats import compute_r2, compute_mae, compute_rmse
 from scipy.stats import spearmanr
-from matplotlib.cm import viridis, magma
+from matplotlib.cm import viridis
 
 def plot_learning_curve(save_path, training_loss, validation_loss):
 
@@ -19,21 +17,21 @@ def plot_learning_curve(save_path, training_loss, validation_loss):
     plt.figure(figsize=(8, 5))
     plt.plot(epochs, training_loss, label='Training Loss', linewidth=2)
     plt.plot(epochs, validation_loss, label='Validation Loss', linewidth=2)
-    
+
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.title('Learning Curve')
-    
+
     # Set x-axis ticks every 10 epochs, including the first and last
     step = 10
     xticks = np.arange(0, len(epochs) + step, step)
     if xticks[-1] != len(epochs):  # Ensure last epoch is included
         xticks = np.append(xticks, len(epochs))
     plt.xticks(xticks)
-    
+
     plt.grid(False)  # Remove grid
     plt.legend()
-    
+
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
@@ -44,6 +42,7 @@ def parity_plot(
     plot_title,
     true_column,
     pred_column,
+    quantity_label="Target",
     percentile_clip=99.5,
     plot_width=800,
     plot_height=800,
@@ -66,10 +65,12 @@ def parity_plot(
     print(f"MAE        = {mae:.5f}")
     print(f"Spearman R = {spearman_rho:.5f}")
 
-    # Clip range to ignore outliers
+    # Clip range at both ends to ignore outliers (targets may be negative)
     combined = np.concatenate([y_true, y_pred])
+    min_val = np.percentile(combined, 100 - percentile_clip)
     max_val = np.percentile(combined, percentile_clip)
-    min_val = 0
+    if max_val <= min_val:  # degenerate (constant) data
+        min_val, max_val = min_val - 1.0, max_val + 1.0
 
     x_range = (min_val, max_val)
     y_range = (min_val, max_val)
@@ -94,7 +95,7 @@ def parity_plot(
     fig, ax = plt.subplots(figsize=(8, 8))
 
     extent = [x_range[0], x_range[1], y_range[0], y_range[1]]
-    im = ax.imshow(img_np, extent=extent, origin="lower", aspect="equal")
+    ax.imshow(img_np, extent=extent, origin="lower", aspect="equal")
 
     # Diagonal parity line y = x
     ax.plot(
@@ -122,21 +123,19 @@ def parity_plot(
         bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.3')
     )
 
-    ax.set_xlabel("Simulated Uptake [mol/kg]", fontsize=font_size)
-    ax.set_ylabel("Predicted Uptake [mol/kg]", fontsize=font_size)
+    ax.set_xlabel(f"True {quantity_label}", fontsize=font_size)
+    ax.set_ylabel(f"Predicted {quantity_label}", fontsize=font_size)
     ax.set_title(plot_title, fontsize=font_size + 2)
     ax.legend()
 
-    # Create colorbar
-    # Create a ScalarMappable just for the colorbar
+    # Colorbar via a ScalarMappable (the image itself is a pre-shaded RGB array)
     norm = mpl.colors.Normalize(vmin=0, vmax=density_max)
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
 
-    # Add colorbar to the figure
     cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
     cbar.ax.tick_params(labelsize=font_size / 1.5)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
- 
+    plt.close(fig)
