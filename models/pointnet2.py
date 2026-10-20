@@ -91,7 +91,8 @@ class get_model(nn.Module):
 
     # PBC: lattice is [B, 3, 3] with rows = lattice vectors a, b, c (ASE convention).
     # If lattice=None the model runs without PBC (molecule mode).
-    def forward(self, xyz_features, extra_features=None, lattice=None):
+    # src_idx: [B, N] source point of every point from upsample_collate (None = no copies).
+    def forward(self, xyz_features, extra_features=None, lattice=None, src_idx=None):
         B, C, N = xyz_features.shape
         # Geometry stays in float32 (see the precision note in pointnet2_util).
         xyz = xyz_features[:, :3, :].float()
@@ -131,17 +132,19 @@ class get_model(nn.Module):
         # Pass through SA layers
         # PBC: lattice/lattice_inv passed to SA1 and SA2 (local neighbourhood layers).
         #      SA3 uses group_all=True (global pooling over abstract features) — no PBC needed.
-        l1_xyz, l1_points, fps1 = self.sa1(xyz, atomic_feats, lattice=lattice, lattice_inv=lattice_inv)
+        # src_idx tracks which points/centroids are copies, level by level; fps indices
+        # always refer to original points (never to upsampled copies).
+        l1_xyz, l1_points, fps1, l1_src_idx = self.sa1(xyz, atomic_feats, src_idx, lattice=lattice, lattice_inv=lattice_inv)
         self.saved_features["sa1"] = l1_points
         self.fps_indices["sa1"] = fps1
         self.saved_features["sa1_xyz"] = l1_xyz
 
-        l2_xyz, l2_points, fps2 = self.sa2(l1_xyz, l1_points, lattice=lattice, lattice_inv=lattice_inv)
+        l2_xyz, l2_points, fps2, l2_src_idx = self.sa2(l1_xyz, l1_points, l1_src_idx, lattice=lattice, lattice_inv=lattice_inv)
         self.saved_features["sa2"] = l2_points
         self.fps_indices["sa2"] = fps2
         self.saved_features["sa2_xyz"] = l2_xyz
 
-        l3_xyz, l3_points, _ = self.sa3(l2_xyz, l2_points)  # PBC: not needed for global pooling
+        l3_xyz, l3_points, _, _ = self.sa3(l2_xyz, l2_points, l2_src_idx)  # PBC: not needed for global pooling
         x = l3_points.view(B, 1024)
 
         # Fully Connected Layers

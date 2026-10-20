@@ -27,6 +27,13 @@
 #       squared distances use explicit differences instead of ||a||² + ||b||² − 2a·b,
 #       which cancels catastrophically for coordinates far from the origin.
 #   The learned MLPs (Conv2d/BN/SiLU) still run under AMP.
+#
+# UPSAMPLED DUPLICATES:
+#   upsample_collate pads clouds with copies of random atoms. src_idx [B, N] gives,
+#   for every point, the index of the original point it was copied from (itself for
+#   originals). Copies are excluded from ball queries, and mean pooling averages only
+#   over distinct real neighbours (padding slots and repeated centroids are masked).
+#   Max pooling is unaffected by copies.
 
 import torch
 import torch.nn as nn
@@ -215,6 +222,9 @@ def farthest_point_sample(xyz, npoint, L=None, L_inv=None):
         farthest = torch.max(distance, -1)[1]
     return centroids
 
+# Random FPS start point; set False for deterministic centroids (e.g. reproducibility checks).
+FPS_RANDOM_START = True
+
 # ---------------------------------------------------------------------------
 # CUDA-accelerated FPS via torch_cluster (requires separate installation):
 #   pip install torch-cluster -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
@@ -234,18 +244,45 @@ def farthest_point_sample_cuda(xyz, npoint, L=None, L_inv=None):
     xyz_flat = xyz.reshape(B * N, 3).float()  # float32 required by torch_cluster
     batch    = torch.arange(B, device=device).repeat_interleave(N)
     ratio    = npoint / N
-    sampled  = tc_fps(xyz_flat, batch, ratio=ratio, random_start=True)  # global indices [B*npoint]
+    sampled  = tc_fps(xyz_flat, batch, ratio=ratio, random_start=FPS_RANDOM_START)  # global indices [B*npoint]
     offsets  = (torch.arange(B, device=device) * N).unsqueeze(1)        # [B, 1]
     fps_idx  = (sampled.reshape(B, npoint) - offsets).long()            # [B, npoint]
     return fps_idx
 
 
-# Returns the query point itself for groups with no neighbour inside the radius.
-# PBC: L and L_inv added for MIC-based radius search (naive distances when L is None).
-def query_ball_point(radius, nsample, xyz, new_xyz, query_idx, L=None, L_inv=None):
+def map_centroids_to_sources(fps_idx, src_idx):
     """
-    query_idx : [B, S] indices of the query points within xyz (the FPS indices),
-                used as the fallback neighbour for empty groups.
+    Replace each FPS centroid by the original point it was copied from, and build
+    src_idx for the next SA level: a centroid whose source point was already picked
+    by an earlier centroid points to that earlier centroid. This happens whenever a
+    cloud has fewer distinct points than npoint; those repeated centroids are kept
+    (fixed tensor shapes) but treated as copies at the next level.
+
+    Args:
+        fps_idx : [B, S]  FPS centroid indices into the current points
+        src_idx : [B, N]  source point of every current point (itself for originals)
+    Returns:
+        centroid_src : [B, S]  source point of every centroid (used as the centroid index)
+        next_src_idx : [B, S]  source centroid of every centroid, for the next level
+    """
+    centroid_src = src_idx.gather(1, fps_idx)
+    B, S = centroid_src.shape
+    order = torch.arange(S, device=fps_idx.device).expand(B, S)
+    # first_pick[b, n] = position of the first centroid whose source is point n (S if none)
+    first_pick = torch.full_like(src_idx, S).scatter_reduce(1, centroid_src, order, reduce="amin")
+    next_src_idx = first_pick.gather(1, centroid_src)
+    return centroid_src, next_src_idx
+
+
+# PBC: L and L_inv added for MIC-based radius search (naive distances when L is None).
+def query_ball_point(radius, nsample, xyz, new_xyz, query_idx, L=None, L_inv=None, is_source=None):
+    """
+    query_idx : [B, S] indices of the query points within xyz, used to fill groups
+                with no neighbour inside the radius.
+    is_source : [B, N] bool, False for upsampled copies, which are never selected.
+    Returns:
+        group_idx : [B, S, nsample] neighbour indices; unused slots repeat the first neighbour
+        slot_mask : [B, S, nsample] bool, True for real neighbours inside the radius
     """
     B, N, C = xyz.shape
 
@@ -253,6 +290,8 @@ def query_ball_point(radius, nsample, xyz, new_xyz, query_idx, L=None, L_inv=Non
         sqrdists = pbc_square_distance(new_xyz, xyz, L, L_inv)  # [B, S, N]
     else:
         sqrdists = square_distance(new_xyz, xyz)                # [B, S, N]
+    if is_source is not None:
+        sqrdists = sqrdists.masked_fill(~is_source.unsqueeze(1), float("inf"))
 
     # Partial topk selection — O(N log nsample) vs full sort O(N log N)
     sorted_dists, group_idx = sqrdists.topk(nsample, dim=-1, largest=False, sorted=True)  # [B, S, nsample]
@@ -269,24 +308,32 @@ def query_ball_point(radius, nsample, xyz, new_xyz, query_idx, L=None, L_inv=Non
     group_first_expanded = group_first.unsqueeze(-1).expand_as(group_idx)  # [B, S, nsample]
     group_idx = torch.where(group_idx == N, group_first_expanded, group_idx)
 
-    return group_idx
+    return group_idx, ~beyond_radius
 
 # PBC: L and L_inv threaded into ball query and local displacement.
-def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False, L=None, L_inv=None):
+def sample_and_group(npoint, radius, nsample, xyz, points, src_idx=None, L=None, L_inv=None):
     """
     Geometry (FPS, ball query, local displacements) is computed in exact float32
     with autocast disabled. Grouped point features keep their incoming dtype.
+
+    src_idx : [B, N] source point of every point (None = all points are originals).
+    Returns new_xyz, new_points, fps_idx, slot_mask, next_src_idx.
     """
     B, N, C = xyz.shape
     S = npoint
+    point_order = torch.arange(N, device=xyz.device).expand(B, N)
+    if src_idx is None:
+        src_idx = point_order
     with torch.autocast(device_type=xyz.device.type, enabled=False):
         xyz = xyz.float()
         if L is not None:
             L, L_inv = L.float(), L_inv.float()
         # fps_idx = farthest_point_sample(xyz, npoint, L=L, L_inv=L_inv)  # Python FPS (MIC distances, exact, slow)
         fps_idx = farthest_point_sample_cuda(xyz, npoint)                 # CUDA FPS (Euclidean; requires torch_cluster)
+        fps_idx, next_src_idx = map_centroids_to_sources(fps_idx, src_idx)
         new_xyz = index_points(xyz, fps_idx)
-        idx = query_ball_point(radius, nsample, xyz, new_xyz, fps_idx, L=L, L_inv=L_inv)
+        idx, slot_mask = query_ball_point(radius, nsample, xyz, new_xyz, fps_idx, L=L, L_inv=L_inv,
+                                          is_source=src_idx == point_order)
         grouped_xyz = index_points(xyz, idx)  # [B, npoint, nsample, C]
         # Local displacements (what the MLP learns from) are MIC-corrected so that
         # atoms across a cell boundary get the correct short-range vector.
@@ -302,13 +349,10 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False, L=No
     else:
         new_points = grouped_xyz_norm
 
-    # return FPS indices when requested (for Grad-CAM)
-    if returnfps:
-        return new_xyz, new_points, fps_idx
-    else:
-        return new_xyz, new_points
+    return new_xyz, new_points, fps_idx, slot_mask, next_src_idx
 
-def sample_and_group_all(xyz, points):
+def sample_and_group_all(xyz, points, src_idx=None):
+    """Returns new_xyz, new_points, slot_mask ([B, 1, N], False for repeated points)."""
     device = xyz.device
     B, N, C = xyz.shape
     new_xyz = torch.zeros(B, 1, C).to(device)
@@ -317,7 +361,11 @@ def sample_and_group_all(xyz, points):
         new_points = torch.cat([grouped_xyz, points.reshape(B, 1, N, -1).to(grouped_xyz.dtype)], dim=-1)
     else:
         new_points = grouped_xyz
-    return new_xyz, new_points
+    if src_idx is None:
+        slot_mask = torch.ones(B, 1, N, dtype=torch.bool, device=device)
+    else:
+        slot_mask = (src_idx == torch.arange(N, device=device)).unsqueeze(1)
+    return new_xyz, new_points, slot_mask
 
 class PointNetSetAbstraction(nn.Module):
     def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
@@ -340,20 +388,22 @@ class PointNetSetAbstraction(nn.Module):
         c_out = mlp[-1]
         self.pool_fusion = nn.Conv1d(c_out, c_out, kernel_size=2, groups=c_out, bias=True)
 
+    # src_idx: [B, N] source point of every input point (None = all originals).
     # PBC: lattice and lattice_inv are optional kwargs threaded into sampling/grouping.
     #      SA layers with group_all=True (SA3) ignore them (global pooling, no local search).
-    def forward(self, xyz, points, lattice=None, lattice_inv=None):
+    # Returns new_xyz, new_points, fps_idx, next_src_idx (fps_idx/next_src_idx are None for group_all).
+    def forward(self, xyz, points, src_idx=None, lattice=None, lattice_inv=None):
         xyz = xyz.permute(0, 2, 1)
         if points is not None:
             points = points.permute(0, 2, 1)
 
         if self.group_all:
-            new_xyz, new_points = sample_and_group_all(xyz, points)
-            fps_idx = None
+            new_xyz, new_points, slot_mask = sample_and_group_all(xyz, points, src_idx)
+            fps_idx = next_src_idx = None
         else:
-            new_xyz, new_points, fps_idx = sample_and_group(
+            new_xyz, new_points, fps_idx, slot_mask, next_src_idx = sample_and_group(
                 self.npoint, self.radius, self.nsample, xyz, points,
-                returnfps=True, L=lattice, L_inv=lattice_inv              # PBC
+                src_idx=src_idx, L=lattice, L_inv=lattice_inv              # PBC
             )
         new_points = new_points.permute(0, 3, 2, 1)
         for i, conv in enumerate(self.mlp_convs):
@@ -361,9 +411,11 @@ class PointNetSetAbstraction(nn.Module):
             new_points = F.silu(bn(conv(new_points)))
 
         # Dual-stat (max, mean) pooling fused by per-channel depthwise Conv1d.
-        max_pts  = torch.max(new_points, 2)[0]                        # [B, C, npoint]
-        mean_pts = torch.mean(new_points, 2)                          # [B, C, npoint]
-        stats    = torch.stack([max_pts, mean_pts], dim=-1)           # [B, C, npoint, 2]
+        # The mean covers only real neighbours (slot_mask); the max is unaffected by repeats.
+        slot_mask = slot_mask.transpose(1, 2).unsqueeze(1).to(new_points.dtype)   # [B, 1, nsample, npoint]
+        max_pts  = torch.max(new_points, 2)[0]                                    # [B, C, npoint]
+        mean_pts = (new_points * slot_mask).sum(2) / slot_mask.sum(2)             # [B, C, npoint]
+        stats    = torch.stack([max_pts, mean_pts], dim=-1)                       # [B, C, npoint, 2]
 
         # No normalization applied — max and mean share the same scale after
         # the BatchNorm/SiLU Conv2d layers (LayerNorm over 2 elements would
@@ -376,7 +428,7 @@ class PointNetSetAbstraction(nn.Module):
         new_points = new_points.reshape(B_sz, np_sz, C_sz).permute(0, 2, 1)
 
         new_xyz = new_xyz.permute(0, 2, 1)
-        return new_xyz, new_points, fps_idx
+        return new_xyz, new_points, fps_idx, next_src_idx
 
 
 """ # This code has been adapted from:

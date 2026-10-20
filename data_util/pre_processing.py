@@ -185,21 +185,29 @@ def upsample_collate(batch, min_points=1024):
     Pad every point cloud in the batch to a common size by re-sampling random
     existing atoms (with replacement), so the batch can be stacked into one tensor.
     The target size is max(largest cloud in the batch, min_points).
+
+    Also returns src_idx [B, max_points]: the index of the original atom each point
+    was copied from (itself for originals), so the model can ignore the copies.
     """
     pcs, lattices, extras, targets, indices = zip(*batch)
 
     max_points = max(max(pc.shape[1] for pc in pcs), min_points)
 
     upsampled_pcs = []
+    src_idx = []
     for pc in pcs:
         N = pc.shape[1]
+        src = torch.arange(N, device=pc.device)
         num_points_to_add = max_points - N
         if num_points_to_add > 0:
             idx = torch.randint(0, N, (num_points_to_add,), device=pc.device)
             pc = torch.cat([pc, pc[:, idx]], dim=1)
+            src = torch.cat([src, idx])
         upsampled_pcs.append(pc)
+        src_idx.append(src)
 
     pcs_tensor = torch.stack(upsampled_pcs, dim=0)
+    src_idx_tensor = torch.stack(src_idx, dim=0)
     if lattices[0] is not None:
         lattices_tensor = torch.stack(list(lattices), dim=0)   # [B, 3, 3]
     else:
@@ -214,4 +222,4 @@ def upsample_collate(batch, min_points=1024):
     targets_tensor = torch.stack(targets, dim=0).reshape(-1)   # [B], also for a batch of size 1
     indices_tensor = torch.tensor(indices, dtype=torch.long)
 
-    return pcs_tensor, lattices_tensor, extras_tensor, targets_tensor, indices_tensor
+    return pcs_tensor, src_idx_tensor, lattices_tensor, extras_tensor, targets_tensor, indices_tensor

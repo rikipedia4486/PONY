@@ -18,12 +18,13 @@ class StructureDataset(Dataset):
         return pc, lattice, extra, target, row_idx
 
 
-def _to_device(pc, lattice, extra_features, target, device):
+def _to_device(pc, src_idx, lattice, extra_features, target, device):
     pc             = pc.to(device)
+    src_idx        = src_idx.to(device)                                             # [B, N] source point of each point
     lattice        = lattice.to(device).float() if lattice is not None else None   # [B, 3, 3] or None
     extra_features = extra_features.to(device)
     target         = target.to(device)
-    return pc, lattice, extra_features, target
+    return pc, src_idx, lattice, extra_features, target
 
 
 def _print_metrics(label, targets, preds):
@@ -54,13 +55,13 @@ def train_one_epoch(model, train_loader, optimizer, loss_fn, device, amp_scaler,
         desc = f"Train {aug+1}/{n_augments}" if n_augments > 1 else "Train"
         progress_bar = tqdm(train_loader, desc=desc, leave=False)
 
-        for pc, lattice, extra_features, target, idx in progress_bar:
-            pc, lattice, extra_features, target = _to_device(pc, lattice, extra_features, target, device)
+        for pc, src_idx, lattice, extra_features, target, idx in progress_bar:
+            pc, src_idx, lattice, extra_features, target = _to_device(pc, src_idx, lattice, extra_features, target, device)
 
             optimizer.zero_grad()
 
             with torch.amp.autocast(device.type):
-                pred, _ = model(pc, extra_features, lattice=lattice)
+                pred, _ = model(pc, extra_features, lattice=lattice, src_idx=src_idx)
                 loss = loss_fn(pred, target)
 
             amp_scaler.scale(loss).backward()
@@ -87,11 +88,11 @@ def evaluate(model, loader, loss_fn, device, label="Val"):
     all_indicies = []
 
     with torch.no_grad():
-        for pc, lattice, extra_features, target, idx in tqdm(loader, desc="Evaluating", leave=False):
-            pc, lattice, extra_features, target = _to_device(pc, lattice, extra_features, target, device)
+        for pc, src_idx, lattice, extra_features, target, idx in tqdm(loader, desc="Evaluating", leave=False):
+            pc, src_idx, lattice, extra_features, target = _to_device(pc, src_idx, lattice, extra_features, target, device)
 
             with torch.amp.autocast(device.type):
-                pred, _ = model(pc, extra_features, lattice=lattice)
+                pred, _ = model(pc, extra_features, lattice=lattice, src_idx=src_idx)
                 loss = loss_fn(pred, target)
 
             running_loss += loss.item() * pc.shape[0]
@@ -142,8 +143,8 @@ def evaluate_tta(model, loader, loss_fn, device, n_rotations=16):
     all_rotation_preds = []
 
     with torch.no_grad():
-        for pc, lattice, extra_features, target, idx in tqdm(loader, desc=f"TTA ({n_rotations} rot)", leave=False):
-            pc, lattice, extra_features, target = _to_device(pc, lattice, extra_features, target, device)
+        for pc, src_idx, lattice, extra_features, target, idx in tqdm(loader, desc=f"TTA ({n_rotations} rot)", leave=False):
+            pc, src_idx, lattice, extra_features, target = _to_device(pc, src_idx, lattice, extra_features, target, device)
 
             B = pc.shape[0]
             rotation_preds = []
@@ -155,7 +156,7 @@ def evaluate_tta(model, loader, loss_fn, device, n_rotations=16):
                 pc_rot = torch.cat([xyz_rot, pc[:, 3:, :].float()], dim=1) if pc.shape[1] > 3 else xyz_rot
 
                 with torch.amp.autocast(device.type):
-                    pred, _ = model(pc_rot, extra_features, lattice=lattice_rot)
+                    pred, _ = model(pc_rot, extra_features, lattice=lattice_rot, src_idx=src_idx)
                 rotation_preds.append(pred.float())
 
             rotation_preds = torch.stack(rotation_preds, dim=0)   # [R, B]
